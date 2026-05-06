@@ -3,6 +3,35 @@
 const toBase64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
 const fromBase64 = (str) => Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
 
+function parseJsonMaybe(value) {
+  if (typeof value !== "string") return value;
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function normalizeEncryptedPayload(payload) {
+  const parsed = parseJsonMaybe(payload);
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Invalid encrypted message payload");
+  }
+
+  return parsed.payload ? normalizeEncryptedPayload(parsed.payload) : parsed;
+}
+
+export function getDecryptedMessageText(parsed) {
+  const value = parseJsonMaybe(parsed);
+
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+
+  return value.content?.text || value.text || "";
+}
+
 export async function importPublicKey(base64Key) {
   return window.crypto.subtle.importKey(
     "spki",
@@ -113,18 +142,10 @@ export async function encryptHybrid(
   );
   const iv = window.crypto.getRandomValues(new Uint8Array(12));
 
-  const payload = JSON.stringify({
-    v: "wb.message.v1",
-    content: {
-      kind: "text",
-      text: plaintext,
-    },
-  });
-
   const ciphertext = await window.crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
     aesKey,
-    new TextEncoder().encode(payload),
+    new TextEncoder().encode(plaintext),
   );
 
   const rawAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
@@ -153,9 +174,12 @@ export async function encryptHybrid(
 
 // ✅ Fixed: isSender flag to pick the right encrypted key
 export async function decryptHybrid(payload, myPrivateKey, isSender = false) {
+  const normalizedPayload = normalizeEncryptedPayload(payload);
   const encryptedKeyForSelf =
-    payload.encryptedKeyForSelf || payload.encrypted_key_for_self;
-  const encryptedKey = payload.encryptedKey || payload.encrypted_key;
+    normalizedPayload.encryptedKeyForSelf ||
+    normalizedPayload.encrypted_key_for_self;
+  const encryptedKey =
+    normalizedPayload.encryptedKey || normalizedPayload.encrypted_key;
   const keyCandidates = isSender
     ? [encryptedKeyForSelf, encryptedKey]
     : [encryptedKey, encryptedKeyForSelf];
@@ -189,11 +213,11 @@ export async function decryptHybrid(payload, myPrivateKey, isSender = false) {
   );
 
   const decryptedBuffer = await window.crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: fromBase64(payload.iv) },
+    { name: "AES-GCM", iv: fromBase64(normalizedPayload.iv) },
     aesKey,
-    fromBase64(payload.ciphertext),
+    fromBase64(normalizedPayload.ciphertext),
   );
 
   const decoded = new TextDecoder().decode(decryptedBuffer);
-  return JSON.parse(decoded);
+  return parseJsonMaybe(decoded);
 }
